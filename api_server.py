@@ -94,7 +94,11 @@ def _ssh_mkdir(server_ip, username, password, ssh_port, remote_path):
 def _sftp_put(server_ip, username, password, ssh_port, local_file, remote_path):
     target = "%s@%s:%s" % (username, server_ip, remote_path)
     base = _build_ssh_auth_options(ssh_port)
-    command = ["scp"] + base + [local_file, target]
+    scp_base = list(base)
+    if "-p" in scp_base:
+        port_index = scp_base.index("-p")
+        scp_base[port_index] = "-P"
+    command = ["scp"] + scp_base + [local_file, target]
     return _run_with_password(command, password)
 
 
