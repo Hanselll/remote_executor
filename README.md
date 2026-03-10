@@ -12,6 +12,9 @@ python3 api_server.py
 
 - `UPLOAD_API_HOST`（默认 `0.0.0.0`）
 - `UPLOAD_API_PORT`（默认 `58080`）
+- `UPLOAD_API_PATH_PREFIX_MAP`（默认空），用于路径映射，格式为 JSON 字典。
+  - 例如：`{"/mnt/hgfs/":"/data/shared/"}`
+  - 当请求中的 `file_name` 在服务端不可见时，会尝试按前缀替换后再查找。
 
 ## 健康检查
 
@@ -38,4 +41,6 @@ curl -s http://127.0.0.1:58080/tool/upload_file \
 
 - `remote_path` 视为目标目录，服务端会自动拼接本地文件名作为远端文件名。
 - 上传前会自动执行 `mkdir -p remote_path`。
+- `file_name` 必须是 **API 服务进程所在机器** 可以访问的路径。
+- 若返回 `file_not_found`，响应中的 `tried_paths` 会列出服务端实际尝试过的本地路径，便于排查。
 - 该实现调用系统 `ssh`/`sftp` 命令，代码本身不依赖第三方 Python 库。

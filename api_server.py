@@ -8,6 +8,48 @@ import tempfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
+def _load_path_prefix_map():
+    raw = os.environ.get("UPLOAD_API_PATH_PREFIX_MAP", "").strip()
+    if not raw:
+        return {}
+    try:
+        data = json.loads(raw)
+    except ValueError:
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    path_map = {}
+    for source, target in data.items():
+        if isinstance(source, str) and isinstance(target, str) and source and target:
+            path_map[source] = target
+    return path_map
+
+
+def _resolve_local_file(file_name, path_prefix_map):
+    candidates = []
+
+    def _add_candidate(value):
+        if value and value not in candidates:
+            candidates.append(value)
+
+    _add_candidate(file_name)
+    expanded = os.path.expandvars(os.path.expanduser(file_name))
+    _add_candidate(expanded)
+    if not os.path.isabs(expanded):
+        _add_candidate(os.path.abspath(expanded))
+
+    for source_prefix, target_prefix in path_prefix_map.items():
+        if expanded.startswith(source_prefix):
+            mapped = target_prefix + expanded[len(source_prefix) :]
+            _add_candidate(mapped)
+
+    for candidate in candidates:
+        if os.path.isfile(candidate):
+            return candidate, candidates
+
+    return None, candidates
+
+
 def _json_response(handler, status_code, payload):
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status_code)
@@ -137,6 +179,7 @@ class UploadHandler(BaseHTTPRequestHandler):
         password = payload["password"]
         ssh_port = payload["ssh_port"]
         remote_path = payload["remote_path"]
+        path_prefix_map = _load_path_prefix_map()
 
         try:
             ssh_port = int(ssh_port)
@@ -144,21 +187,26 @@ class UploadHandler(BaseHTTPRequestHandler):
             _json_response(self, 400, {"error": "invalid_ssh_port"})
             return
 
-        if not os.path.isfile(file_name):
-            _json_response(self, 400, {"error": "file_not_found", "file_name": file_name})
+        resolved_file, tried_paths = _resolve_local_file(file_name, path_prefix_map)
+        if not resolved_file:
+            _json_response(
+                self,
+                400,
+                {"error": "file_not_found", "file_name": file_name, "tried_paths": tried_paths},
+            )
             return
 
         remote_dir = remote_path.rstrip("/")
         if not remote_dir:
             remote_dir = "/"
-        remote_file = remote_dir.rstrip("/") + "/" + os.path.basename(file_name)
+        remote_file = remote_dir.rstrip("/") + "/" + os.path.basename(resolved_file)
 
         code, _out, err = _ssh_mkdir(server_ip, username, password, ssh_port, remote_dir)
         if code != 0:
             _json_response(self, 500, {"error": "remote_mkdir_failed", "detail": err.strip()})
             return
 
-        code, out, err = _sftp_put(server_ip, username, password, ssh_port, file_name, remote_file)
+        code, out, err = _sftp_put(server_ip, username, password, ssh_port, resolved_file, remote_file)
         if code != 0:
             _json_response(self, 500, {"error": "upload_failed", "detail": (err or out).strip()})
             return
@@ -169,6 +217,7 @@ class UploadHandler(BaseHTTPRequestHandler):
             {
                 "status": "success",
                 "file_name": file_name,
+                "resolved_file": resolved_file,
                 "remote_file": remote_file,
                 "server_ip": server_ip,
                 "ssh_port": ssh_port,
