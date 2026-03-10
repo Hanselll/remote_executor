@@ -44,11 +44,13 @@ def _build_ssh_auth_options(ssh_port):
         "-o",
         "GlobalKnownHostsFile=/dev/null",
         "-o",
+        "LogLevel=ERROR",
+        "-o",
         "PreferredAuthentications=password",
         "-o",
         "PubkeyAuthentication=no",
         "-o",
-        "KbdInteractiveAuthentication=no",
+        "KbdInteractiveAuthentication=yes",
         "-p",
         str(ssh_port),
     ]
@@ -84,32 +86,42 @@ def _ssh_mkdir(server_ip, username, password, ssh_port, remote_path):
     target = "%s@%s" % (username, server_ip)
     command = ["ssh"] + _build_ssh_auth_options(ssh_port) + [
         target,
-        "mkdir -p '%s'" % remote_path.replace("'", "'\''"),
+        "mkdir -p '%s'" % remote_path.replace("'", "'\\''"),
     ]
     return _run_with_password(command, password)
 
 
 def _sftp_put(server_ip, username, password, ssh_port, local_file, remote_path):
     target = "%s@%s" % (username, server_ip)
+    escaped_remote = remote_path.replace("'", "'\\''")
+    command = ["ssh"] + _build_ssh_auth_options(ssh_port) + [
+        target,
+        "cat > '%s'" % escaped_remote,
+    ]
 
-    fd, batch_path = tempfile.mkstemp(prefix="sftp_batch_", suffix=".txt")
-    os.close(fd)
+    with open(local_file, "rb") as handle:
+        payload = handle.read()
+
+    askpass_path = _build_askpass_script(password)
+    env = os.environ.copy()
+    env["SSH_ASKPASS"] = askpass_path
+    env["SSH_ASKPASS_REQUIRE"] = "force"
+    env["DISPLAY"] = ":0"
+
     try:
-        with open(batch_path, "w") as batch:
-            batch.write("put \"%s\" \"%s\"\n" % (local_file, remote_path))
-
-        base = _build_ssh_auth_options(ssh_port)
-        if base[-2] == "-p":
-            base[-2] = "-P"
-        command = ["sftp"] + base + [
-            "-b",
-            batch_path,
-            target,
-        ]
-        return _run_with_password(command, password)
+        process = subprocess.Popen(
+            command,
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            env=env,
+            start_new_session=True,
+        )
+        stdout, stderr = process.communicate(input=payload)
+        return process.returncode, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
     finally:
         try:
-            os.remove(batch_path)
+            os.remove(askpass_path)
         except OSError:
             pass
 
