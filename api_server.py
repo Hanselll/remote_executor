@@ -1,53 +1,13 @@
 #!/usr/bin/env python3
 """Simple upload API server using only Python standard library (Python 3.6 compatible)."""
 
+import cgi
+import io
 import json
 import os
 import subprocess
 import tempfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
-
-
-def _load_path_prefix_map():
-    raw = os.environ.get("UPLOAD_API_PATH_PREFIX_MAP", "").strip()
-    if not raw:
-        return {}
-    try:
-        data = json.loads(raw)
-    except ValueError:
-        return {}
-    if not isinstance(data, dict):
-        return {}
-    path_map = {}
-    for source, target in data.items():
-        if isinstance(source, str) and isinstance(target, str) and source and target:
-            path_map[source] = target
-    return path_map
-
-
-def _resolve_local_file(file_name, path_prefix_map):
-    candidates = []
-
-    def _add_candidate(value):
-        if value and value not in candidates:
-            candidates.append(value)
-
-    _add_candidate(file_name)
-    expanded = os.path.expandvars(os.path.expanduser(file_name))
-    _add_candidate(expanded)
-    if not os.path.isabs(expanded):
-        _add_candidate(os.path.abspath(expanded))
-
-    for source_prefix, target_prefix in path_prefix_map.items():
-        if expanded.startswith(source_prefix):
-            mapped = target_prefix + expanded[len(source_prefix) :]
-            _add_candidate(mapped)
-
-    for candidate in candidates:
-        if os.path.isfile(candidate):
-            return candidate, candidates
-
-    return None, candidates
 
 
 def _json_response(handler, status_code, payload):
@@ -142,6 +102,48 @@ def _sftp_put(server_ip, username, password, ssh_port, local_file, remote_path):
             pass
 
 
+def _parse_json_payload(body):
+    try:
+        payload = json.loads(body.decode("utf-8"))
+    except Exception:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def _parse_multipart_payload(handler, body):
+    form = cgi.FieldStorage(
+        fp=io.BytesIO(body),
+        headers=handler.headers,
+        environ={
+            "REQUEST_METHOD": "POST",
+            "CONTENT_TYPE": handler.headers.get("Content-Type", ""),
+            "CONTENT_LENGTH": str(len(body)),
+        },
+        keep_blank_values=True,
+    )
+
+    upload_item = form["file"] if "file" in form else None
+    if upload_item is None:
+        return None, {"error": "missing_fields", "fields": ["file"]}
+    if isinstance(upload_item, list):
+        upload_item = upload_item[0]
+    if not getattr(upload_item, "filename", None):
+        return None, {"error": "invalid_file", "detail": "file part has no filename"}
+
+    payload = {
+        "server_ip": form.getfirst("server_ip"),
+        "username": form.getfirst("username"),
+        "password": form.getfirst("password"),
+        "ssh_port": form.getfirst("ssh_port"),
+        "remote_path": form.getfirst("remote_path"),
+        "file_name": form.getfirst("file_name") or os.path.basename(upload_item.filename),
+        "uploaded_bytes": upload_item.file.read(),
+    }
+    return payload, None
+
+
 class UploadHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/health":
@@ -161,10 +163,26 @@ class UploadHandler(BaseHTTPRequestHandler):
             return
 
         body = self.rfile.read(length)
-        try:
-            payload = json.loads(body.decode("utf-8"))
-        except Exception:
-            _json_response(self, 400, {"error": "invalid_json"})
+        content_type = (self.headers.get("Content-Type") or "").lower()
+
+        if content_type.startswith("multipart/form-data"):
+            payload, parse_err = _parse_multipart_payload(self, body)
+            if parse_err:
+                _json_response(self, 400, parse_err)
+                return
+        else:
+            payload = _parse_json_payload(body)
+            if not payload:
+                _json_response(self, 400, {"error": "invalid_json"})
+                return
+            _json_response(
+                self,
+                400,
+                {
+                    "error": "local_path_not_supported",
+                    "detail": "Use multipart/form-data and send the file content with -F file=@/path/to/file",
+                },
+            )
             return
 
         required = ["file_name", "server_ip", "username", "password", "ssh_port", "remote_path"]
@@ -173,56 +191,50 @@ class UploadHandler(BaseHTTPRequestHandler):
             _json_response(self, 400, {"error": "missing_fields", "fields": missing})
             return
 
-        file_name = payload["file_name"]
-        server_ip = payload["server_ip"]
-        username = payload["username"]
-        password = payload["password"]
-        ssh_port = payload["ssh_port"]
-        remote_path = payload["remote_path"]
-        path_prefix_map = _load_path_prefix_map()
-
         try:
-            ssh_port = int(ssh_port)
+            ssh_port = int(payload["ssh_port"])
         except (TypeError, ValueError):
             _json_response(self, 400, {"error": "invalid_ssh_port"})
             return
 
-        resolved_file, tried_paths = _resolve_local_file(file_name, path_prefix_map)
-        if not resolved_file:
+        temp_path = None
+        try:
+            fd, temp_path = tempfile.mkstemp(prefix="upload_api_", suffix="_" + os.path.basename(payload["file_name"]))
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(payload["uploaded_bytes"])
+
+            remote_dir = payload["remote_path"].rstrip("/")
+            if not remote_dir:
+                remote_dir = "/"
+            remote_file = remote_dir.rstrip("/") + "/" + os.path.basename(payload["file_name"])
+
+            code, _out, err = _ssh_mkdir(payload["server_ip"], payload["username"], payload["password"], ssh_port, remote_dir)
+            if code != 0:
+                _json_response(self, 500, {"error": "remote_mkdir_failed", "detail": err.strip()})
+                return
+
+            code, out, err = _sftp_put(payload["server_ip"], payload["username"], payload["password"], ssh_port, temp_path, remote_file)
+            if code != 0:
+                _json_response(self, 500, {"error": "upload_failed", "detail": (err or out).strip()})
+                return
+
             _json_response(
                 self,
-                400,
-                {"error": "file_not_found", "file_name": file_name, "tried_paths": tried_paths},
+                200,
+                {
+                    "status": "success",
+                    "file_name": payload["file_name"],
+                    "remote_file": remote_file,
+                    "server_ip": payload["server_ip"],
+                    "ssh_port": ssh_port,
+                },
             )
-            return
-
-        remote_dir = remote_path.rstrip("/")
-        if not remote_dir:
-            remote_dir = "/"
-        remote_file = remote_dir.rstrip("/") + "/" + os.path.basename(resolved_file)
-
-        code, _out, err = _ssh_mkdir(server_ip, username, password, ssh_port, remote_dir)
-        if code != 0:
-            _json_response(self, 500, {"error": "remote_mkdir_failed", "detail": err.strip()})
-            return
-
-        code, out, err = _sftp_put(server_ip, username, password, ssh_port, resolved_file, remote_file)
-        if code != 0:
-            _json_response(self, 500, {"error": "upload_failed", "detail": (err or out).strip()})
-            return
-
-        _json_response(
-            self,
-            200,
-            {
-                "status": "success",
-                "file_name": file_name,
-                "resolved_file": resolved_file,
-                "remote_file": remote_file,
-                "server_ip": server_ip,
-                "ssh_port": ssh_port,
-            },
-        )
+        finally:
+            if temp_path and os.path.exists(temp_path):
+                try:
+                    os.remove(temp_path)
+                except OSError:
+                    pass
 
     def log_message(self, format_str, *args):
         return
