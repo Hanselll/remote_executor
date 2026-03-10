@@ -31,6 +31,29 @@ def _build_askpass_script(password):
     return script_path
 
 
+
+
+def _build_ssh_auth_options(ssh_port):
+    return [
+        "-F",
+        "/dev/null",
+        "-o",
+        "StrictHostKeyChecking=no",
+        "-o",
+        "UserKnownHostsFile=/dev/null",
+        "-o",
+        "GlobalKnownHostsFile=/dev/null",
+        "-o",
+        "PreferredAuthentications=password",
+        "-o",
+        "PubkeyAuthentication=no",
+        "-o",
+        "KbdInteractiveAuthentication=no",
+        "-p",
+        str(ssh_port),
+    ]
+
+
 def _run_with_password(command, password):
     askpass_path = _build_askpass_script(password)
     env = os.environ.copy()
@@ -59,16 +82,9 @@ def _run_with_password(command, password):
 
 def _ssh_mkdir(server_ip, username, password, ssh_port, remote_path):
     target = "%s@%s" % (username, server_ip)
-    command = [
-        "ssh",
-        "-o",
-        "StrictHostKeyChecking=no",
-        "-o",
-        "UserKnownHostsFile=/dev/null",
-        "-p",
-        str(ssh_port),
+    command = ["ssh"] + _build_ssh_auth_options(ssh_port) + [
         target,
-        "mkdir -p '%s'" % remote_path.replace("'", "'\\''"),
+        "mkdir -p '%s'" % remote_path.replace("'", "'\''"),
     ]
     return _run_with_password(command, password)
 
@@ -82,14 +98,10 @@ def _sftp_put(server_ip, username, password, ssh_port, local_file, remote_path):
         with open(batch_path, "w") as batch:
             batch.write("put \"%s\" \"%s\"\n" % (local_file, remote_path))
 
-        command = [
-            "sftp",
-            "-o",
-            "StrictHostKeyChecking=no",
-            "-o",
-            "UserKnownHostsFile=/dev/null",
-            "-P",
-            str(ssh_port),
+        base = _build_ssh_auth_options(ssh_port)
+        if base[-2] == "-p":
+            base[-2] = "-P"
+        command = ["sftp"] + base + [
             "-b",
             batch_path,
             target,

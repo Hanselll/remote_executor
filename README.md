@@ -40,3 +40,4 @@ curl -s http://127.0.0.1:58080/tool/upload_file \
 - 上传前会自动执行 `mkdir -p remote_path`。
 - 当前版本不再支持 JSON 里仅传 `file_name` 让 API 服务器查本地路径；如果用该模式会返回 `local_path_not_supported`。
 - 该实现调用系统 `ssh`/`sftp` 命令，代码本身不依赖第三方 Python 库。
+- 为避免宿主机 `/etc/ssh/ssh_config` 中不兼容项（如旧版本不识别 `GSSAPIAuthentication`）导致失败，服务端会使用 `-F /dev/null` 忽略系统级 SSH 配置，并强制走密码认证。
