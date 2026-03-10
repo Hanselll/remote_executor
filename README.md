@@ -1,6 +1,6 @@
 # Remote Executor Upload API
 
-一个仅依赖 Python 3.6 标准库的常驻 API Server，用于接收 `/tool/upload_file` 请求，并把 **curl 客户端上传的文件内容** 通过 SSH/SFTP 上传到远端服务器。
+一个仅依赖 Python 3.6 标准库的常驻 API Server，用于接收 `/tool/upload_file` 请求，并把 **curl 客户端上传的文件内容** 通过 SSH/SCP 上传到远端服务器。
 
 ## 启动
 
@@ -39,7 +39,7 @@ curl -s http://127.0.0.1:58080/tool/upload_file \
 - `remote_path` 视为目标目录，服务端会自动拼接文件名作为远端文件名。
 - 上传前会自动执行 `mkdir -p remote_path`。
 - 当前版本不再支持 JSON 里仅传 `file_name` 让 API 服务器查本地路径；如果用该模式会返回 `local_path_not_supported`。
-- 该实现调用系统 `ssh`/`sftp` 命令，代码本身不依赖第三方 Python 库。
+- 该实现调用系统 `ssh`/`scp` 命令，代码本身不依赖第三方 Python 库。
 - 为避免宿主机 `/etc/ssh/ssh_config` 中不兼容项（如旧版本不识别 `GSSAPIAuthentication`）导致失败，服务端会使用 `-F /dev/null` 忽略系统级 SSH 配置，并强制走密码认证。
 
 

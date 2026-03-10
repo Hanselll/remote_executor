@@ -92,38 +92,10 @@ def _ssh_mkdir(server_ip, username, password, ssh_port, remote_path):
 
 
 def _sftp_put(server_ip, username, password, ssh_port, local_file, remote_path):
-    target = "%s@%s" % (username, server_ip)
-    escaped_remote = remote_path.replace("'", "'\\''")
-    command = ["ssh"] + _build_ssh_auth_options(ssh_port) + [
-        target,
-        "cat > '%s'" % escaped_remote,
-    ]
-
-    with open(local_file, "rb") as handle:
-        payload = handle.read()
-
-    askpass_path = _build_askpass_script(password)
-    env = os.environ.copy()
-    env["SSH_ASKPASS"] = askpass_path
-    env["SSH_ASKPASS_REQUIRE"] = "force"
-    env["DISPLAY"] = ":0"
-
-    try:
-        process = subprocess.Popen(
-            command,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            env=env,
-            start_new_session=True,
-        )
-        stdout, stderr = process.communicate(input=payload)
-        return process.returncode, stdout.decode("utf-8", "replace"), stderr.decode("utf-8", "replace")
-    finally:
-        try:
-            os.remove(askpass_path)
-        except OSError:
-            pass
+    target = "%s@%s:%s" % (username, server_ip, remote_path)
+    base = _build_ssh_auth_options(ssh_port)
+    command = ["scp"] + base + [local_file, target]
+    return _run_with_password(command, password)
 
 
 def _parse_json_payload(body):
