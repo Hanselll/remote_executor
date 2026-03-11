@@ -47,3 +47,35 @@ curl -s http://127.0.0.1:58080/tool/upload_file \
 
 - 如果返回 `Permission denied (publickey,password)`，通常是目标机账号/密码/端口不正确，或目标机 sshd 禁止密码登录（`PasswordAuthentication no`）。
 - 建议先在 API 服务器上手工验证：`ssh -F /dev/null -p <ssh_port> <username>@<server_ip>`。
+
+
+## 运行用例接口（JSON）
+
+在文件上传完成后，可调用该接口在 **API Server 所在机器** 执行：
+
+```bash
+cd /home/gsta/chaosmesh_workflow_runner_v16
+python3 -m chaos_runner.runner --case chaos_runner/cases/<上传的文件>
+```
+
+请求示例：
+
+```bash
+curl -s http://127.0.0.1:58080/tool/run_case \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "file_name": "modular_partition_ddb_with_upc_upu_upclb_kill.yaml"
+  }'
+```
+
+可选环境变量：
+
+- `CASE_WORKDIR`（默认 `/home/gsta/chaosmesh_workflow_runner_v16`）
+- `CASE_RELATIVE_DIR`（默认 `chaos_runner/cases`）
+- `CASE_RUN_TIMEOUT_SECONDS`（默认 `3600`）
+
+说明：
+
+- `file_name` 必填；服务端会自动取 basename 后拼接到 `CASE_RELATIVE_DIR`。
+- 若目标文件不存在，会返回 `case_file_not_found`。
+- 命令执行失败会返回 `status=failed` 与 stdout/stderr。

@@ -10,6 +10,61 @@ import tempfile
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
 
+CASE_WORKDIR = os.environ.get("CASE_WORKDIR", "/home/gsta/chaosmesh_workflow_runner_v16")
+CASE_RELATIVE_DIR = os.environ.get("CASE_RELATIVE_DIR", "chaos_runner/cases")
+CASE_RUN_TIMEOUT_SECONDS = int(os.environ.get("CASE_RUN_TIMEOUT_SECONDS", "3600"))
+
+
+def _run_case_command(file_name):
+    safe_name = os.path.basename(file_name or "")
+    if not safe_name:
+        return 400, {"error": "missing_fields", "fields": ["file_name"]}
+
+    case_file = os.path.join(CASE_WORKDIR, CASE_RELATIVE_DIR, safe_name)
+    if not os.path.isfile(case_file):
+        return 400, {"error": "case_file_not_found", "file_name": safe_name, "case_file": case_file}
+
+    command = [
+        "python3",
+        "-m",
+        "chaos_runner.runner",
+        "--case",
+        os.path.join(CASE_RELATIVE_DIR, safe_name),
+    ]
+
+    try:
+        process = subprocess.Popen(
+            command,
+            cwd=CASE_WORKDIR,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            universal_newlines=True,
+        )
+        stdout, stderr = process.communicate(timeout=CASE_RUN_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        process.kill()
+        stdout, stderr = process.communicate()
+        return 500, {
+            "error": "case_run_timeout",
+            "timeout_seconds": CASE_RUN_TIMEOUT_SECONDS,
+            "stdout": stdout,
+            "stderr": stderr,
+        }
+
+    payload = {
+        "status": "success" if process.returncode == 0 else "failed",
+        "return_code": process.returncode,
+        "file_name": safe_name,
+        "case_file": case_file,
+        "command": " ".join(command),
+        "stdout": stdout,
+        "stderr": stderr,
+    }
+    if process.returncode != 0:
+        return 500, payload
+    return 200, payload
+
+
 def _json_response(handler, status_code, payload):
     body = json.dumps(payload, ensure_ascii=False).encode("utf-8")
     handler.send_response(status_code)
@@ -152,10 +207,15 @@ class UploadHandler(BaseHTTPRequestHandler):
         _json_response(self, 404, {"error": "not_found"})
 
     def do_POST(self):
-        if self.path != "/tool/upload_file":
-            _json_response(self, 404, {"error": "not_found"})
+        if self.path == "/tool/upload_file":
+            self._handle_upload_file()
             return
+        if self.path == "/tool/run_case":
+            self._handle_run_case()
+            return
+        _json_response(self, 404, {"error": "not_found"})
 
+    def _handle_upload_file(self):
         try:
             length = int(self.headers.get("Content-Length", "0"))
         except ValueError:
@@ -235,6 +295,23 @@ class UploadHandler(BaseHTTPRequestHandler):
                     os.remove(temp_path)
                 except OSError:
                     pass
+
+    def _handle_run_case(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+        except ValueError:
+            _json_response(self, 400, {"error": "invalid_content_length"})
+            return
+
+        body = self.rfile.read(length)
+        payload = _parse_json_payload(body)
+        if not payload:
+            _json_response(self, 400, {"error": "invalid_json"})
+            return
+
+        file_name = payload.get("file_name")
+        status_code, response = _run_case_command(file_name)
+        _json_response(self, status_code, response)
 
     def log_message(self, format_str, *args):
         return
